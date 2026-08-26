@@ -75,13 +75,25 @@ Two content scripts, both injected at `document_start`:
   `done (already there)` **without** issuing a move — so a first run over a
   large workspace doesn't spend its budget re-filing channels that are
   already correct.
-- **Move queue**: matched channels are moved one at a time, 1.2 s apart, for
-  as long as the tab stays open — a few hundred channels take a few minutes
-  rather than being truncated. A ledger entry is written when a move is
-  *issued*, not when queued, and any `pending` entry found at load (the
-  residue of a tab closed mid-drain) is cleared so those channels are
+
+  Because failures are terminal, a channel lost to a transient problem stays
+  lost. Options has a **Retry N failed moves** button (shown only when there
+  are any) that drops just the failed entries, leaving successful history
+  intact, so the next Slack reload reconsiders them.
+- **Move queue**: matched channels are moved one at a time, starting at one
+  every 2 s, for as long as the tab stays open — a few hundred channels take
+  several minutes rather than being truncated. A ledger entry is written when
+  a move is *issued*, not when queued, and any `pending` entry found at load
+  (the residue of a tab closed mid-drain) is cleared so those channels are
   reconsidered. A 400-move per-load guard exists only to bound a runaway;
   anything past it is left unrecorded and picked up on the next load.
+- **Rate limiting**: a long run trips Slack's limit on `bulkUpdate` with HTTP
+  429. That is treated as "later", never as a verdict on the channel: the
+  page side holds *all* API calls for the `Retry-After` window (refusing them
+  locally rather than hammering a limiter), and the queue pauses, doubles its
+  spacing up to 30 s, and pushes the channel back to the front. Pace eases
+  back toward 2 s as moves succeed. After 5 rate-limited attempts a channel
+  is left unrecorded for the next load rather than marked failed.
 - **Rules**: ordered, first-match-wins globs (`*` only — patterns are
   regex-escaped first, so there is no user-regex/ReDoS surface). Hot-reload
   on save. Moves are issued sequentially — see **Move queue** above.

@@ -13,11 +13,16 @@
   const TEAM_ID = /^[TE][A-Z0-9]{6,}$/;
   const MAX_NAME_LEN = 200;
   const MAX_RULES = 100;
-  // Runaway guard, not a throttle: moves drain one at a time at
-  // MOVE_SPACING_MS for as long as the tab is open, and anything past the
-  // guard is retried on the next load rather than dropped.
+  // Runaway guard, not a throttle: moves drain one at a time for as long as
+  // the tab is open, and anything past the guard is retried on the next load
+  // rather than dropped.
   const MAX_MOVES_PER_BOOT = 400;
-  const MOVE_SPACING_MS = 1200;
+  // Slack rate-limits bursts of bulkUpdate with HTTP 429, so pacing adapts:
+  // start here, double (up to MAX) on a 429, and ease back down on success.
+  const MOVE_SPACING_MS = 2000;
+  const MAX_SPACING_MS = 30000;
+  const SPACING_RECOVERY_MS = 250;
+  const MAX_MOVE_ATTEMPTS = 5;
   const LEDGER_MAX = 5000;
   const CATCHUP_DELAY_MS = 5000;
   // No rules ship with the extension: on a fresh install it must not move
@@ -70,9 +75,12 @@
   let issued = 0;       // actually sent to the page side
   let alreadyFiled = 0; // matched a rule but were already in the right section
   let deferred = 0;     // over the guard; left for the next page load
-  const pendingOps = new Map(); // opId -> ledger key
+  const pendingOps = new Map(); // opId -> the in-flight job (so it can be re-queued)
   const queue = [];
   let draining = false;
+  let spacing = MOVE_SPACING_MS; // current pace, widened by rate limits
+  let pauseUntil = 0;            // hard stop while Slack is rate limiting us
+  let rateLimitHits = 0;
 
   function saveLedger() {
     const keys = Object.keys(ledger);
@@ -182,10 +190,19 @@
     if (draining) return;
     draining = true;
     const next = () => {
+      // Wait out any rate-limit cooldown before touching the queue.
+      const hold = pauseUntil - Date.now();
+      if (hold > 0) return setTimeout(next, Math.min(hold, 5000));
+
       const job = queue.shift();
       if (!job) {
         draining = false;
-        if (issued) DBG("move queue drained —", issued, "issued this session");
+        if (issued) {
+          DBG(
+            "move queue drained — " + issued + " issued this session" +
+            (rateLimitHits ? ", " + rateLimitHits + " rate-limit pause(s)" : "")
+          );
+        }
         return;
       }
       const opId = crypto.randomUUID();
@@ -197,7 +214,7 @@
         ts: Date.now(),
       };
       saveLedger();
-      pendingOps.set(opId, job.key);
+      pendingOps.set(opId, job);
       issued++;
       post({
         kind: "move-channel",
@@ -206,15 +223,51 @@
         sectionName: job.sectionName,
         opId,
       });
-      setTimeout(next, MOVE_SPACING_MS);
+      setTimeout(next, spacing);
     };
     next();
   }
 
+  // Slack said "too fast": hold the queue for as long as it asked, widen the
+  // pace, and put the channel back at the front — it was never attempted.
+  function onRateLimited(job, retryAfterSec) {
+    rateLimitHits++;
+    const wait = Math.max(
+      (Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec : 30) * 1000,
+      spacing
+    );
+    pauseUntil = Math.max(pauseUntil, Date.now() + wait);
+    spacing = Math.min(spacing * 2, MAX_SPACING_MS);
+    delete ledger[job.key];
+
+    job.attempts = (job.attempts || 0) + 1;
+    if (job.attempts >= MAX_MOVE_ATTEMPTS) {
+      // Leave it unrecorded rather than marking it failed — the next page
+      // load reconsiders it with a fresh rate-limit budget.
+      saveLedger();
+      DBG("giving up on #" + job.name, "after", job.attempts, "rate-limited attempts — next load will retry");
+      return;
+    }
+    queue.unshift(job);
+    saveLedger();
+    DBG(
+      "rate limited — pausing " + Math.ceil(wait / 1000) + "s, pace now " +
+      (spacing / 1000) + "s/move, " + (queue.length) + " left"
+    );
+  }
+
   function onMoveResult(d) {
-    const key = pendingOps.get(d.opId);
-    if (!key) return;
+    const job = pendingOps.get(d.opId);
+    if (!job) return;
     pendingOps.delete(d.opId);
+    const key = job.key;
+
+    // Rate limited: nothing was attempted, so this is a scheduling problem,
+    // not a verdict on the channel. Back off and re-queue.
+    if (d.ok !== true && d.stage === "rate-limited") {
+      return onRateLimited(job, d.retryAfter);
+    }
+
     const entry = ledger[key];
     if (!entry || entry.status !== "pending") return;
 
@@ -228,6 +281,12 @@
       saveLedger();
       DBG("move deferred (sections unreadable)", key, "— will retry next load");
       return;
+    }
+
+    // A clean result means the current pace is tolerable — creep back toward
+    // the base rate so one 429 doesn't slow the rest of the run forever.
+    if (d.ok === true && spacing > MOVE_SPACING_MS) {
+      spacing = Math.max(MOVE_SPACING_MS, spacing - SPACING_RECOVERY_MS);
     }
 
     entry.status = d.ok === true ? "done" : "failed";
@@ -329,6 +388,12 @@
       }
       case "move-result": {
         if (typeof d.opId !== "string" || d.opId.length > 64) return;
+        // Clamp the retry hint: a hostile or buggy value must not be able to
+        // stall the queue indefinitely.
+        if (d.retryAfter !== undefined) {
+          const n = Number(d.retryAfter);
+          d.retryAfter = Number.isFinite(n) ? Math.min(Math.max(n, 0), 300) : undefined;
+        }
         onMoveResult(d);
         break;
       }

@@ -23,6 +23,7 @@
   const countEl = document.getElementById("ledger-count");
   const pagerEl = document.getElementById("ledger-pager");
   const rangeEl = document.getElementById("ledger-range");
+  const retryBtn = document.getElementById("retry-failed");
 
   let knownSections = [];
   let knownChannels = [];
@@ -393,8 +394,32 @@
     ledgerEntries = Object.entries(ledger || {}).sort(
       (a, b) => (b[1].ts || 0) - (a[1].ts || 0)
     );
+    const failed = ledgerEntries.filter(([, e]) => e && e.status === "failed").length;
+    retryBtn.hidden = failed === 0;
+    retryBtn.textContent = "Retry " + failed + " failed move" + (failed === 1 ? "" : "s");
     renderLedgerPage();
   }
+
+  // Failures are terminal so they never storm, but that also means a channel
+  // lost to a transient problem (a rate limit, a blip) stays lost. This drops
+  // just the failed entries, leaving successful history intact, so the next
+  // Slack reload reconsiders them.
+  retryBtn.addEventListener("click", () => {
+    chrome.storage.local.get(["ledger"], (data) => {
+      const ledger = data.ledger && typeof data.ledger === "object" ? data.ledger : {};
+      let cleared = 0;
+      for (const [k, e] of Object.entries(ledger)) {
+        if (e && e.status === "failed") { delete ledger[k]; cleared++; }
+      }
+      chrome.storage.local.set({ ledger }, () => {
+        loadLedger(ledger);
+        setStatus(
+          cleared + " failed move(s) cleared — reload Slack to retry them.",
+          true
+        );
+      });
+    });
+  });
 
   searchEl.addEventListener("input", () => { page = 0; renderLedgerPage(); });
   document.getElementById("ledger-prev").addEventListener("click", () => {

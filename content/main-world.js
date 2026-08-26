@@ -167,8 +167,35 @@
     return list;
   }
 
+  // ---------------------------------------------------------------------
+  // Rate limiting. Slack answers a burst of bulkUpdate calls with HTTP 429.
+  // Once that happens, every further call in the cooldown window is refused
+  // locally rather than sent — hammering a rate limiter only extends it.
+  // ---------------------------------------------------------------------
+
+  const DEFAULT_COOLDOWN_S = 30;
+  let rateLimitedUntil = 0;
+
+  function noteRateLimit(retryAfterSec) {
+    const secs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+      ? retryAfterSec
+      : DEFAULT_COOLDOWN_S;
+    const until = Date.now() + secs * 1000;
+    if (until > rateLimitedUntil) {
+      rateLimitedUntil = until;
+      DBG("rate limited by Slack — holding all API calls for " + secs + "s");
+    }
+  }
+
+  const rateLimitActive = () => Date.now() < rateLimitedUntil;
+  const retryAfterSeconds = () =>
+    Math.max(1, Math.ceil((rateLimitedUntil - Date.now()) / 1000));
+
   // Returns parsed JSON, or null on network/HTTP failure.
   async function rawCall(candidate, method, fields, token) {
+    if (rateLimitActive()) {
+      return { ok: false, error: "ratelimited", retry_after: retryAfterSeconds() };
+    }
     const body = new URLSearchParams(fields || {});
     body.set("token", token);
     // The official client tags calls with _x_* telemetry params. Not required,
@@ -186,6 +213,13 @@
         credentials: candidate.credentials,
         signal: ctrl.signal,
       });
+      if (res.status === 429) {
+        // Surface rate limiting as a distinct, retryable condition rather
+        // than a generic failure — it means "later", not "no".
+        const header = parseInt(res.headers.get("Retry-After") || "", 10);
+        noteRateLimit(header);
+        return { ok: false, error: "ratelimited", retry_after: retryAfterSeconds() };
+      }
       if (!res.ok) {
         DBG(method, "via", candidate.name, "— http", res.status);
         return null;
@@ -324,18 +358,28 @@
         ? resp.channel_section_id ||
           (resp.channel_section && resp.channel_section.channel_section_id)
         : null;
-    if (typeof sid !== "string" || !sid) return null;
+    if (typeof sid !== "string" || !sid) return { id: null, resp };
     DBG('created section "' + name + '"');
-    return sid;
+    return { id: sid, resp };
   }
 
   async function handleMove(d) {
     const { teamId, channelId, sectionName, opId } = d;
-    const result = (ok, stage) =>
-      post({ kind: "move-result", opId, ok, stage, teamId, channelId });
+    const result = (ok, stage, retryAfter) =>
+      post({ kind: "move-result", opId, ok, stage, retryAfter, teamId, channelId });
+    // A rate-limited step means "later", not "no" — report it distinctly so
+    // the queue backs off and re-tries instead of burning the channel.
+    const fail = (stage, resp) =>
+      resp && resp.error === "ratelimited"
+        ? result(false, "rate-limited", resp.retry_after)
+        : result(false, stage);
 
     const sections = await listSections(teamId);
-    if (!sections) return result(false, "list");
+    if (!sections) {
+      return rateLimitActive()
+        ? result(false, "rate-limited", retryAfterSeconds())
+        : result(false, "list");
+    }
 
     const wanted = sectionName.trim().toLowerCase();
     let target = sections.find(
@@ -349,9 +393,9 @@
     }
 
     if (!target) {
-      const sid = await createSection(teamId, sectionName, sections);
-      if (!sid) return result(false, "create");
-      target = { channel_section_id: sid };
+      const created = await createSection(teamId, sectionName, sections);
+      if (!created.id) return fail("create", created.resp);
+      target = { channel_section_id: created.id };
       publishSections(teamId); // keep the options dropdown current
     }
 
@@ -369,7 +413,7 @@
       ),
     };
     const upd = await slackApi(teamId, "users.channelSections.channels.bulkUpdate", fields);
-    if (!upd || upd.ok !== true) return result(false, "bulkUpdate");
+    if (!upd || upd.ok !== true) return fail("bulkUpdate", upd);
     result(true, "moved");
   }
 
