@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Slack Sync — Options</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font: 14px/1.5 system-ui, -apple-system, sans-serif;
+      max-width: 820px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+    }
+    h1 { font-size: 1.3rem; }
+    h2 { font-size: 1.05rem; margin-top: 2rem; }
+    p.hint { opacity: 0.75; font-size: 0.85rem; }
+    table { border-collapse: collapse; width: 100%; }
+    table[hidden] { display: none; }
+    th, td { text-align: left; padding: 4px 8px 4px 0; }
+    /* Top-aligned so the Pattern and Section controls line up on their first
+       row even when the pattern cell grows a preview line beneath it. */
+    #rules-table td { vertical-align: top; }
+
+    /* One shared control box for both columns so heights match exactly. */
+    input[type="text"], select {
+      width: 100%;
+      height: 30px;
+      padding: 4px 6px;
+      font: inherit;
+      box-sizing: border-box;
+      vertical-align: top;
+    }
+    input.invalid, select.invalid { outline: 2px solid #c0392b; }
+    button { font: inherit; padding: 4px 10px; cursor: pointer; }
+    button.icon { padding: 2px 8px; }
+    .row-actions { white-space: nowrap; width: 1%; }
+
+    /* The section cell swaps the dropdown for a text field in place. */
+    .section-cell { display: flex; gap: 4px; align-items: flex-start; }
+    .section-cell > select, .section-cell > input { flex: 1 1 auto; min-width: 0; }
+    .section-cell > button { flex: 0 0 auto; height: 30px; }
+
+    #status { margin-left: 0.75rem; font-size: 0.85rem; }
+    #status.ok { color: #2d8a4e; }
+    #status.err { color: #c0392b; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    #save-rules:not(:disabled) {
+      border-color: #2d6cdf;
+      font-weight: 600;
+    }
+    #unsaved {
+      margin-left: 0.5rem;
+      font-size: 0.85rem;
+      color: #b07d10;
+      font-weight: 600;
+    }
+    #sections-note { font-size: 0.85rem; opacity: 0.75; }
+    .preview {
+      font-size: 0.78rem;
+      opacity: 0.75;
+      margin-top: 3px;
+      min-height: 1.1em;
+    }
+    .preview.warn { color: #b07d10; opacity: 1; }
+    button.link {
+      background: none;
+      border: none;
+      padding: 0;
+      font: inherit;
+      height: auto;
+      color: #2d6cdf;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+    .notice {
+      font-size: 0.88rem;
+      padding: 8px 10px;
+      border-left: 3px solid #b07d10;
+      background: rgba(176, 125, 16, 0.08);
+    }
+    #ledger-table td, #ledger-table th {
+      font-size: 0.82rem;
+      border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+      padding: 3px 10px 3px 0;
+      vertical-align: middle;
+    }
+    .status-done { color: #2d8a4e; }
+    .status-failed { color: #c0392b; }
+    .status-pending { color: #b07d10; }
+    #empty-ledger { opacity: 0.6; }
+    .danger { color: #c0392b; }
+    .ledger-controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+    #ledger-search { width: 260px; }
+    #ledger-count { font-size: 0.82rem; opacity: 0.75; margin-left: auto; }
+    .pager { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+    .pager span { font-size: 0.82rem; opacity: 0.75; }
+  </style>
+</head>
+<body>
+  <h1>Slack Sync</h1>
+
+  <h2>Rules</h2>
+  <p class="hint">
+    Channel-name patterns, checked top to bottom — the first match wins.
+    Patterns match the <strong>whole</strong> channel name, so add
+    <code>*</code> for a prefix: <code>internal-*</code> matches
+    <code>#internal-acme</code>, while a bare <code>internal-</code> matches
+    only a channel named exactly that. Sections that don't exist yet are
+    created in Slack the first time a channel needs them.
+  </p>
+  <p id="empty-rules" class="notice" hidden>
+    No rules yet — nothing will be moved. Add one below and press
+    <strong>Save</strong> to start filing channels.
+  </p>
+  <table id="rules-table">
+    <thead>
+      <tr><th style="width:45%">Pattern</th><th>Section</th><th></th></tr>
+    </thead>
+    <tbody id="rules-body"></tbody>
+  </table>
+  <p>
+    <button id="add-rule">Add rule</button>
+    <button id="save-rules" disabled>Save</button>
+    <span id="unsaved" hidden>● Unsaved changes</span>
+    <span id="status"></span>
+  </p>
+  <p id="sections-note"></p>
+
+  <h2>Move history</h2>
+  <p class="hint">
+    Channels already filed once are never touched again — even if you drag
+    them elsewhere. Forgetting the history lets matching channels be re-filed
+    on the next reload.
+  </p>
+  <div class="ledger-controls">
+    <input type="text" id="ledger-search" placeholder="Search channel or section…">
+    <button id="clear-ledger" class="danger">Forget move history</button>
+    <span id="ledger-count"></span>
+  </div>
+  <table id="ledger-table">
+    <thead>
+      <tr><th>Channel</th><th>Section</th><th>Status</th><th>When</th></tr>
+    </thead>
+    <tbody id="ledger-body"></tbody>
+  </table>
+  <p id="empty-ledger" hidden>No moves recorded yet.</p>
+  <div class="pager" id="ledger-pager" hidden>
+    <button id="ledger-prev">← Newer</button>
+    <button id="ledger-next">Older →</button>
+    <span id="ledger-range"></span>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

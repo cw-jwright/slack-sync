@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Slack Sync",
+  "description": "Automatically files newly joined Slack channels into named sidebar sections based on glob rules.",
+  "version": "0.1.0",
+  "minimum_chrome_version": "111",
+  "permissions": ["storage"],
+  "options_page": "options/options.html",
+  "content_scripts": [
+    {
+      "matches": ["https://app.slack.com/*"],
+      "js": ["content/isolated.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://app.slack.com/*"],
+      "js": ["content/main-world.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
+}
